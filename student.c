@@ -9,6 +9,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "os-sim.h"
 
@@ -32,6 +33,13 @@ extern void wake_up(pcb_t *process);
 static pcb_t **current;
 static pthread_mutex_t current_mutex;
 
+// linked list
+static pcb_t *head;
+static pthread_mutex_t list_mutex;
+static pthread_cond_t non_empty_list;
+
+static int scheduling;
+static int timeslice;
 
 /*
  * schedule() is your CPU scheduler.  It should perform the following tasks:
@@ -49,9 +57,58 @@ static pthread_mutex_t current_mutex;
  *	context_switch() is prototyped in os-sim.h. Look there for more information 
  *	about it and its parameters.
  */
+static void list_add(pcb_t* pcb) {
+    pcb_t* curr;
+    pthread_mutex_lock(&list_mutex);
+    if (head==NULL) {
+        head = pcb;
+    }
+    else {
+        curr = head;
+        while(curr->next!=NULL) {
+            curr = curr->next;
+        }
+        curr->next = pcb;
+    }
+    pcb->next = NULL;
+    pthread_cond_broadcast(&non_empty_list);
+    pthread_mutex_unlock(&list_mutex);
+}
+static pcb_t* list_pop() {
+    pcb_t* ret;
+    pthread_mutex_lock(&list_mutex);
+    ret = head;
+    if(ret!=NULL) {
+        head = ret->next;
+    }
+    pthread_mutex_unlock(&list_mutex);
+    return ret;
+}
+
 static void schedule(unsigned int cpu_id)
 {
-    /* FIX ME */
+    pcb_t  *runnable_process;
+    pthread_mutex_lock(&current_mutex);
+    if(head!=NULL) { //if something in list
+        //get head of list
+        runnable_process = list_pop();
+        runnable_process->state = PROCESS_RUNNING;
+        //context switches
+        if(scheduling == SCHED_FIFO){
+            context_switch(cpu_id, runnable_process, -1);
+        } else {
+            context_switch(cpu_id, runnable_process, timeslice);
+        }
+        current[cpu_id] = runnable_process;
+    } 
+    else {
+        if(scheduling == SCHED_FIFO){
+            context_switch(cpu_id, NULL, -1);
+        } else {
+            context_switch(cpu_id, NULL, timeslice);
+        }
+    }
+    pthread_mutex_unlock(&current_mutex);
 }
 
 
@@ -65,8 +122,13 @@ static void schedule(unsigned int cpu_id)
 extern void idle(unsigned int cpu_id)
 {
     /* FIX ME */
-    schedule(0);
+    pthread_mutex_lock(&list_mutex);
+    while(head==NULL) {
+        pthread_cond_wait(&non_empty_list, &list_mutex);
+    }
 
+    pthread_mutex_unlock(&list_mutex);
+    schedule(cpu_id);
     /*
      * REMOVE THE LINE BELOW AFTER IMPLEMENTING IDLE()
      *
@@ -76,7 +138,7 @@ extern void idle(unsigned int cpu_id)
      * you implement a proper idle() function using a condition variable,
      * remove the call to mt_safe_usleep() below.
      */
-    mt_safe_usleep(1000000);
+    //mt_safe_usleep(1000000);
 }
 
 
@@ -89,7 +151,13 @@ extern void idle(unsigned int cpu_id)
  */
 extern void preempt(unsigned int cpu_id)
 {
-    /* FIX ME */
+    pcb_t* pcb;
+    pthread_mutex_lock(&current_mutex);
+    pcb = current[cpu_id];
+    pcb->state = PROCESS_READY;
+    pthread_mutex_unlock(&current_mutex);
+    list_add(pcb);
+    schedule(cpu_id);
 }
 
 
@@ -102,7 +170,12 @@ extern void preempt(unsigned int cpu_id)
  */
 extern void yield(unsigned int cpu_id)
 {
-    /* FIX ME */
+    pcb_t* pcb;
+    pthread_mutex_lock(&current_mutex);
+    pcb = current[cpu_id];
+    pcb->state = PROCESS_WAITING;
+    pthread_mutex_unlock(&current_mutex);
+    schedule(cpu_id);
 }
 
 
@@ -113,7 +186,12 @@ extern void yield(unsigned int cpu_id)
  */
 extern void terminate(unsigned int cpu_id)
 {
-    /* FIX ME */
+    pcb_t* pcb;
+    pthread_mutex_lock(&current_mutex);
+    pcb = current[cpu_id];
+    pcb->state = PROCESS_TERMINATED;
+    pthread_mutex_unlock(&current_mutex);
+    schedule(cpu_id);
 }
 
 
@@ -135,7 +213,9 @@ extern void terminate(unsigned int cpu_id)
  */
 extern void wake_up(pcb_t *process)
 {
-    /* FIX ME */
+    process->state = PROCESS_READY;
+    list_add(process);
+
 }
 
 
@@ -148,7 +228,7 @@ int main(int argc, char *argv[])
     unsigned int cpu_count;
 
     /* Parse command-line arguments */
-    if (argc != 2)
+    if (argc < 2 || argc > 4)
     {
         fprintf(stderr, "Multithreaded OS Simulator\n"
             "Usage: ./os-sim <# CPUs> [ -l | -r <time slice> ]\n"
@@ -157,7 +237,14 @@ int main(int argc, char *argv[])
             "         -r : Round-Robin Scheduler\n\n");
         return -1;
     }
+    timeslice = -1;
+    scheduling = SCHED_FIFO; //default FIFO
     cpu_count = strtoul(argv[1], NULL, 0);
+    
+    if(argc>2 && strcmp(argv[2],"-r") == 0) {
+        timeslice = atoi(argv[3]);
+        scheduling = SCHED_RR;
+    }
 
     /* FIX ME - Add support for -l and -r parameters*/
 
